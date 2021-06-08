@@ -12,7 +12,7 @@
    See the README file in the top-level LAMMPS directory.
 ------------------------------------------------------------------------- */
 
-#include "pair_6_8_10.h"
+#include "pair_inv_poly.h"
 
 #include <cmath>
 #include "atom.h"
@@ -27,14 +27,14 @@ using namespace LAMMPS_NS;
 
 /* ---------------------------------------------------------------------- */
 
-PairYukawa::PairYukawa(LAMMPS *lmp) : Pair(lmp)
+PairInvPoly::PairInvPoly(LAMMPS *lmp) : Pair(lmp)
 {
   writedata = 1;
 }
 
 /* ---------------------------------------------------------------------- */
 
-PairYukawa::~PairYukawa()
+PairInvPoly::~PairInvPoly()
 {
   if (copymode) return;
 
@@ -42,16 +42,21 @@ PairYukawa::~PairYukawa()
     memory->destroy(setflag);
     memory->destroy(cutsq);
 
-    memory->destroy(rad);
     memory->destroy(cut);
-    memory->destroy(a);
+    memory->destroy(sigma);
+    memory->destroy(a2);
+    memory->destroy(a4);
+    memory->destroy(a6);
+    memory->destroy(a8);
+    memory->destroy(a10);
+    memory->destroy(a12);
     memory->destroy(offset);
   }
 }
 
 /* ---------------------------------------------------------------------- */
 
-void PairYukawa::compute(int eflag, int vflag)
+void PairInvPoly::compute(int eflag, int vflag)
 {
   int i,j,ii,jj,inum,jnum,itype,jtype;
   double xtmp,ytmp,ztmp,delx,dely,delz,evdwl,fpair;
@@ -142,9 +147,15 @@ void PairYukawa::allocate()
       setflag[i][j] = 0;
 
   memory->create(cutsq,n+1,n+1,"pair:cutsq");
-  memory->create(rad,n+1,"pair:rad");
+
   memory->create(cut,n+1,n+1,"pair:cut");
-  memory->create(a,n+1,n+1,"pair:a");
+  memory->create(sigma,n+1,n+1,"pair:sigma");
+  memory->create(a2,n+1,n+1,"pair:a2")
+  memory->create(a4,n+1,n+1,"pair:a4")
+  memory->create(a6,n+1,n+1,"pair:a6")
+  memory->create(a8,n+1,n+1,"pair:a8")
+  memory->create(a10,n+1,n+1,"pair:a10")
+  memory->create(a12,n+1,n+1,"pair:a12")
   memory->create(offset,n+1,n+1,"pair:offset");
 }
 
@@ -152,7 +163,7 @@ void PairYukawa::allocate()
    global settings
 ------------------------------------------------------------------------- */
 
-void PairYukawa::settings(int narg, char **arg)
+void PairInvPoly::settings(int narg, char **arg)
 {
   if (narg != 2) error->all(FLERR,"Illegal pair_style command");
 
@@ -173,25 +184,36 @@ void PairYukawa::settings(int narg, char **arg)
    set coeffs for one or more type pairs
 ------------------------------------------------------------------------- */
 
-void PairYukawa::coeff(int narg, char **arg)
+void PairInvPoly::coeff(int narg, char **arg)
 {
-  if (narg < 3 || narg > 4)
+  /*
+    **ARGS:
+    typei typej sigma a2 a4 a6 a8 a10 a12 rcut
+    ?
+  */
+  
+  if (narg < 9 || narg > 10)
     error->all(FLERR,"Incorrect args for pair coefficients");
   if (!allocated) allocate();
 
+  //read i,j atom types
   int ilo,ihi,jlo,jhi;
   utils::bounds(FLERR,arg[0],1,atom->ntypes,ilo,ihi,error);
   utils::bounds(FLERR,arg[1],1,atom->ntypes,jlo,jhi,error);
 
-  double a_one = utils::numeric(FLERR,arg[2],false,lmp);
+  //read characteristic length
+  double sigma_one = utils::numeric(FLERR,arg[2],false,lmp);
 
+  //if i,j cutoff radius not specified, assign it global cutoff radius
   double cut_one = cut_global;
-  if (narg == 4) cut_one = utils::numeric(FLERR,arg[3],false,lmp);
+  if (narg == 10) cut_one = utils::numeric(FLERR,arg[9],false,lmp);
 
+  //fill "interaction matrices" specifying how atom types interact
+  //"matrices" exist for all parameters of the potential (inlcuding cutoff)
   int count = 0;
   for (int i = ilo; i <= ihi; i++) {
     for (int j = MAX(jlo,i); j <= jhi; j++) {
-      a[i][j] = a_one;
+      sigma[i][j] = sigma_one;
       cut[i][j] = cut_one;
       setflag[i][j] = 1;
       count++;

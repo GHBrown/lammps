@@ -44,7 +44,7 @@ class PairInvPoly : public Pair {
   double cut_global;
   double **cut;
   double **sigma;
-  double **a6, **a8, **a10, **offset;
+  double **a2, **a4, **a6, **a8, **a10, **a12, **offset;
 
   virtual void allocate();
 };
