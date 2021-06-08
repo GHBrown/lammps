@@ -204,6 +204,14 @@ void PairInvPoly::coeff(int narg, char **arg)
   //read characteristic length
   double sigma_one = utils::numeric(FLERR,arg[2],false,lmp);
 
+  //read coefficients of inverse polynomial from **args
+  double a2_one = utils::numeric(FLERR,arg[3],false,lmp);
+  double a4_one = utils::numeric(FLERR,arg[4],false,lmp);
+  double a6_one = utils::numeric(FLERR,arg[5],false,lmp);
+  double a8_one = utils::numeric(FLERR,arg[6],false,lmp);
+  double a10_one = utils::numeric(FLERR,arg[7],false,lmp);
+  double a12_one = utils::numeric(FLERR,arg[8],false,lmp);
+
   //if i,j cutoff radius not specified, assign it global cutoff radius
   double cut_one = cut_global;
   if (narg == 10) cut_one = utils::numeric(FLERR,arg[9],false,lmp);
@@ -215,6 +223,12 @@ void PairInvPoly::coeff(int narg, char **arg)
     for (int j = MAX(jlo,i); j <= jhi; j++) {
       sigma[i][j] = sigma_one;
       cut[i][j] = cut_one;
+      a2[i][j] = a2_one
+      a4[i][j] = a4_one
+      a6[i][j] = a6_one
+      a8[i][j] = a8_one
+      a10[i][j] = a10_one
+      a12[i][j] = a12_one
       setflag[i][j] = 1;
       count++;
     }
@@ -227,17 +241,23 @@ void PairInvPoly::coeff(int narg, char **arg)
    init for one type pair i,j and corresponding j,i
 ------------------------------------------------------------------------- */
 
-double PairYukawa::init_one(int i, int j)
+double PairInvPoly::init_one(int i, int j)
 {
+  //assign mixed parameters if not set
   if (setflag[i][j] == 0) {
-    a[i][j] = mix_energy(a[i][i],a[j][j],1.0,1.0);
+    sigma[i][j] = mix_distance(sigma[i][i],sigma[j][j]);
     cut[i][j] = mix_distance(cut[i][i],cut[j][j]);
   }
 
+  //precalculate the constant terms once since they are r independent
+  //NOTE: THESE TERMS BELOW ARE NOT IN HEADER FILE (YET)
+  inv_poly2[i][j]=pow(sigma[i][j],2.0)
+
   if (offset_flag && (cut[i][j] > 0.0)) {
-    double screening = exp(-kappa * cut[i][j]);
-    offset[i][j] = a[i][j] * screening / cut[i][j];
+    double ratio = sigma[i][j] / cut[i][j];
+    offset[i][j] = pow(ratio,2.0) + pow(ratio,4.0) + pow(ratio,6.0) + pow(ratio,8.0) + pow(ratio,10.0) + pow(ratio,12.0)
   } else offset[i][j] = 0.0;
+
 
   a[j][i] = a[i][j];
   offset[j][i] = offset[i][j];
