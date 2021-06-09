@@ -43,8 +43,11 @@ class PairInvPoly : public Pair {
  protected:
   double cut_global;
   double **cut;
-  double **sigma;
-  double **a2, **a4, **a6, **a8, **a10, **a12, **offset;
+  double **sigma; //characteristic distance
+  double **offset;
+  double **a2, **a4, **a6, **a8, **a10, **a12; //coefficients
+  double **inv_poly2, **inv_poly4, **inv_poly6, **inv_poly8, **inv_poly10, **inv_poly12; //precalculated potential terms
+  double **dinv_poly2, **dinv_poly4, **dinv_poly6, **dinv_poly8, **dinv_poly10, **dinv_poly12; //precalculated force terms
 
   virtual void allocate();
 };

@@ -60,7 +60,7 @@ void PairInvPoly::compute(int eflag, int vflag)
 {
   int i,j,ii,jj,inum,jnum,itype,jtype;
   double xtmp,ytmp,ztmp,delx,dely,delz,evdwl,fpair;
-  double rsq,r2inv,r,rinv,screening,forceyukawa,factor;
+  double rsq,r2inv,r6inv,r8inv,r10inv,r12inv,forceinvpoly,factor;
   int *ilist,*jlist,*numneigh,**firstneigh;
 
   evdwl = 0.0;
@@ -101,13 +101,24 @@ void PairInvPoly::compute(int eflag, int vflag)
       jtype = type[j];
 
       if (rsq < cutsq[itype][jtype]) {
-        r2inv = 1.0/rsq;
-        r = sqrt(rsq);
-        rinv = 1.0/r;
-        screening = exp(-kappa*r);
-        forceyukawa = a[itype][jtype] * screening * (kappa + rinv);
-
-        fpair = factor*forceyukawa * r2inv;
+	//compute factors of r
+	r2inv  = 1.0/rsq;
+	r4inv  = r2inv  * r2inv;
+	r6inv  = r4inv  * r2inv;
+	r8inv  = r6inv  * r2inv;
+	r10inv = r8inv  * r2inv;
+	r12inv = r10inv * r2inv;
+	/*
+	  NOTE 
+	  neither forceinvpoly nor fpair represent the full radial force -dE(r)/dr
+	  but fpair * r_vec = fpair * [delx dely delz] = -dE(r)/dr * r_vec_norm (r_vec is vector distance between two atoms, r_vec_norm is the normalized r_vec)
+	  this formulations helps to reduce floating point operations (especially the square root) for even polynomial potentials
+	*/
+	//compute the negative derivative of E(r), but do not reduce powers of r (so forceinvpoly is equal to: -(dE(r)/dr) * r)
+	forceinvpoly = dinv_poly2[itype][jtype]*r2inv + dinv_poly4[itype][jtype]*r4inv + dinv_poly6[itype][jtype]*r6inv + dinv_poly8[itype][jtype]*r8inv + dinv_poly10[itype][jtype]*r10inv + dinv_poly12[itype][jtype]*r12inv;
+	//include factor for excluding bonded atoms, and inlclude 1/(r**2) term; fpair = -(dE(r)/r)*(1/r)
+	fpair=factor * forceinvpoly * r2inv; 
+	  
 
         f[i][0] += delx*fpair;
         f[i][1] += dely*fpair;
@@ -119,7 +130,7 @@ void PairInvPoly::compute(int eflag, int vflag)
         }
 
         if (eflag) {
-          evdwl = a[itype][jtype] * screening * rinv - offset[itype][jtype];
+	  evdwl = inv_poly2[itype][jtype]*r2inv + inv_poly4[itype][jtype]*r4inv + inv_poly6[itype][jtype]*r6inv + inv_poly8[itype][jtype]*r8inv + inv_poly10[itype][jtype]*r10inv + inv_poly12[itype][jtype]*r12inv - offset[itype][jtype];
           evdwl *= factor;
         }
 
@@ -136,7 +147,7 @@ void PairInvPoly::compute(int eflag, int vflag)
    allocate all arrays
 ------------------------------------------------------------------------- */
 
-void PairYukawa::allocate()
+void PairInvPoly::allocate()
 {
   allocated = 1;
   int n = atom->ntypes;
@@ -148,15 +159,31 @@ void PairYukawa::allocate()
 
   memory->create(cutsq,n+1,n+1,"pair:cutsq");
 
+  //allocate memory for defining coefficient tables
   memory->create(cut,n+1,n+1,"pair:cut");
   memory->create(sigma,n+1,n+1,"pair:sigma");
-  memory->create(a2,n+1,n+1,"pair:a2")
-  memory->create(a4,n+1,n+1,"pair:a4")
-  memory->create(a6,n+1,n+1,"pair:a6")
-  memory->create(a8,n+1,n+1,"pair:a8")
-  memory->create(a10,n+1,n+1,"pair:a10")
-  memory->create(a12,n+1,n+1,"pair:a12")
+  memory->create(a2,n+1,n+1,"pair:a2");
+  memory->create(a4,n+1,n+1,"pair:a4");
+  memory->create(a6,n+1,n+1,"pair:a6");
+  memory->create(a8,n+1,n+1,"pair:a8");
+  memory->create(a10,n+1,n+1,"pair:a10");
+  memory->create(a12,n+1,n+1,"pair:a12");
+
+  //and for precomputed quantity tables
+  memory->create(inv_poly2,,n+1,n+1,"pair:inv_poly2"); //precomputed parts of potential
+  memory->create(inv_poly4,,n+1,n+1,"pair:inv_poly4");
+  memory->create(inv_poly6,,n+1,n+1,"pair:inv_poly6");
+  memory->create(inv_poly8,,n+1,n+1,"pair:inv_poly8");
+  memory->create(inv_poly10,,n+1,n+1,"pair:inv_poly10");
+  memory->create(inv_poly12,,n+1,n+1,"pair:inv_poly12");
+  memory->create(dinv_poly2,,n+1,n+1,"pair:dinv_poly2"); //precomputed parts of force
+  memory->create(dinv_poly4,,n+1,n+1,"pair:dinv_poly4");
+  memory->create(dinv_poly6,,n+1,n+1,"pair:dinv_poly6");
+  memory->create(dinv_poly8,,n+1,n+1,"pair:dinv_poly8");
+  memory->create(dinv_poly10,,n+1,n+1,"pair:dinv_poly10");
+  memory->create(dinv_poly12,,n+1,n+1,"pair:dinv_poly12");
   memory->create(offset,n+1,n+1,"pair:offset");
+
 }
 
 /* ----------------------------------------------------------------------
@@ -216,19 +243,19 @@ void PairInvPoly::coeff(int narg, char **arg)
   double cut_one = cut_global;
   if (narg == 10) cut_one = utils::numeric(FLERR,arg[9],false,lmp);
 
-  //fill "interaction matrices" specifying how atom types interact
-  //"matrices" exist for all parameters of the potential (inlcuding cutoff)
+  //fill "interaction tables" specifying how atom types interact
+  //"tables" exist for all parameters of the potential (inlcuding cutoff)
   int count = 0;
   for (int i = ilo; i <= ihi; i++) {
     for (int j = MAX(jlo,i); j <= jhi; j++) {
       sigma[i][j] = sigma_one;
       cut[i][j] = cut_one;
-      a2[i][j] = a2_one
-      a4[i][j] = a4_one
-      a6[i][j] = a6_one
-      a8[i][j] = a8_one
-      a10[i][j] = a10_one
-      a12[i][j] = a12_one
+      a2[i][j] = a2_one; 
+      a4[i][j] = a4_one;
+      a6[i][j] = a6_one;
+      a8[i][j] = a8_one;
+      a10[i][j] = a10_one;
+      a12[i][j] = a12_one;
       setflag[i][j] = 1;
       count++;
     }
@@ -249,17 +276,45 @@ double PairInvPoly::init_one(int i, int j)
     cut[i][j] = mix_distance(cut[i][i],cut[j][j]);
   }
 
-  //precalculate the constant terms once since they are r independent
-  //NOTE: THESE TERMS BELOW ARE NOT IN HEADER FILE (YET)
-  inv_poly2[i][j]=pow(sigma[i][j],2.0)
+  //precalculate constant parts of potential once, since they are r-independent
+  inv_poly2[i][j]  = a2[i][j]  * pow(sigma[i][j],2.0);
+  inv_poly4[i][j]  = a4[i][j]  * pow(sigma[i][j],4.0);
+  inv_poly6[i][j]  = a6[i][j]  * pow(sigma[i][j],6.0);
+  inv_poly8[i][j]  = a8[i][j]  * pow(sigma[i][j],8.0);
+  inv_poly10[i][j] = a10[i][j] * pow(sigma[i][j],10.0);
+  inv_poly12[i][j] = a12[i][j] * pow(sigma[i][j],12.0);
+
+  //precalculate constant parts of positive first derivative (for force)
+  dinv_poly2[i][j]  = 2  * a2[i][j]  * pow(sigma[i][j],2.0);
+  dinv_poly4[i][j]  = 4  * a4[i][j]  * pow(sigma[i][j],4.0);
+  dinv_poly6[i][j]  = 6  * a6[i][j]  * pow(sigma[i][j],6.0);
+  dinv_poly8[i][j]  = 8  * a8[i][j]  * pow(sigma[i][j],8.0);
+  dinv_poly10[i][j] = 10 * a10[i][j] * pow(sigma[i][j],10.0);
+  dinv_poly12[i][j] = 12 * a12[i][j] * pow(sigma[i][j],12.0);
+
+  //precalculate constants parts of derivative once
+  
 
   if (offset_flag && (cut[i][j] > 0.0)) {
     double ratio = sigma[i][j] / cut[i][j];
-    offset[i][j] = pow(ratio,2.0) + pow(ratio,4.0) + pow(ratio,6.0) + pow(ratio,8.0) + pow(ratio,10.0) + pow(ratio,12.0)
+    offset[i][j] = pow(ratio,2.0) + pow(ratio,4.0) + pow(ratio,6.0) + pow(ratio,8.0) + pow(ratio,10.0) + pow(ratio,12.0) //THIS LINE IS A TOTAL GUESS BASED ON pair_lj_cut.cpp
   } else offset[i][j] = 0.0;
 
+  //symmetrize interaction
+  inv_poly2[j][i]  = inv_poly2[i][j];
+  inv_poly4[j][i]  = inv_poly4[i][j];
+  inv_poly6[j][i]  = inv_poly6[i][j];
+  inv_poly8[j][i]  = inv_poly8[i][j];
+  inv_poly10[j][i] = inv_poly10[i][j];
+  inv_poly12[j][i] = inv_poly12[i][j];
 
-  a[j][i] = a[i][j];
+  dinv_poly2[j][i]  = dinv_poly2[i][j];
+  dinv_poly4[j][i]  = dinv_poly4[i][j];
+  dinv_poly6[j][i]  = dinv_poly6[i][j];
+  dinv_poly8[j][i]  = dinv_poly8[i][j];
+  dinv_poly10[j][i] = dinv_poly10[i][j];
+  dinv_poly12[j][i] = dinv_poly12[i][j];
+
   offset[j][i] = offset[i][j];
 
   return cut[i][j];
@@ -269,7 +324,7 @@ double PairInvPoly::init_one(int i, int j)
    proc 0 writes to restart file
 ------------------------------------------------------------------------- */
 
-void PairYukawa::write_restart(FILE *fp)
+void PairInvPoly::write_restart(FILE *fp)
 {
   write_restart_settings(fp);
 
@@ -278,7 +333,7 @@ void PairYukawa::write_restart(FILE *fp)
     for (j = i; j <= atom->ntypes; j++) {
       fwrite(&setflag[i][j],sizeof(int),1,fp);
       if (setflag[i][j]) {
-        fwrite(&a[i][j],sizeof(double),1,fp);
+        fwrite(&sigma[i][j],sizeof(double),1,fp);
         fwrite(&cut[i][j],sizeof(double),1,fp);
       }
     }
@@ -288,7 +343,7 @@ void PairYukawa::write_restart(FILE *fp)
    proc 0 reads from restart file, bcasts
 ------------------------------------------------------------------------- */
 
-void PairYukawa::read_restart(FILE *fp)
+void PairInvPoly::read_restart(FILE *fp)
 {
   read_restart_settings(fp);
 
@@ -302,10 +357,22 @@ void PairYukawa::read_restart(FILE *fp)
       MPI_Bcast(&setflag[i][j],1,MPI_INT,0,world);
       if (setflag[i][j]) {
         if (me == 0) {
-          utils::sfread(FLERR,&a[i][j],sizeof(double),1,fp,nullptr,error);
+          utils::sfread(FLERR,&sigma[i][j],sizeof(double),1,fp,nullptr,error);
+          utils::sfread(FLERR,&a2[i][j],sizeof(double),1,fp,nullptr,error);
+          utils::sfread(FLERR,&a4[i][j],sizeof(double),1,fp,nullptr,error);
+          utils::sfread(FLERR,&a6[i][j],sizeof(double),1,fp,nullptr,error);
+          utils::sfread(FLERR,&a8[i][j],sizeof(double),1,fp,nullptr,error);
+          utils::sfread(FLERR,&a10[i][j],sizeof(double),1,fp,nullptr,error);
+          utils::sfread(FLERR,&a12[i][j],sizeof(double),1,fp,nullptr,error);
           utils::sfread(FLERR,&cut[i][j],sizeof(double),1,fp,nullptr,error);
         }
-        MPI_Bcast(&a[i][j],1,MPI_DOUBLE,0,world);
+        MPI_Bcast(&sigma[i][j],1,MPI_DOUBLE,0,world);
+        MPI_Bcast(&a2[i][j],1,MPI_DOUBLE,0,world);
+        MPI_Bcast(&a4[i][j],1,MPI_DOUBLE,0,world);
+        MPI_Bcast(&a6[i][j],1,MPI_DOUBLE,0,world);
+        MPI_Bcast(&a8[i][j],1,MPI_DOUBLE,0,world);
+        MPI_Bcast(&a10[i][j],1,MPI_DOUBLE,0,world);
+        MPI_Bcast(&a12[i][j],1,MPI_DOUBLE,0,world);
         MPI_Bcast(&cut[i][j],1,MPI_DOUBLE,0,world);
       }
     }
@@ -315,9 +382,8 @@ void PairYukawa::read_restart(FILE *fp)
    proc 0 writes to restart file
 ------------------------------------------------------------------------- */
 
-void PairYukawa::write_restart_settings(FILE *fp)
+void PairInvPoly::write_restart_settings(FILE *fp)
 {
-  fwrite(&kappa,sizeof(double),1,fp);
   fwrite(&cut_global,sizeof(double),1,fp);
   fwrite(&offset_flag,sizeof(int),1,fp);
   fwrite(&mix_flag,sizeof(int),1,fp);
@@ -327,15 +393,14 @@ void PairYukawa::write_restart_settings(FILE *fp)
    proc 0 reads from restart file, bcasts
 ------------------------------------------------------------------------- */
 
-void PairYukawa::read_restart_settings(FILE *fp)
+void PairInvPoly::read_restart_settings(FILE *fp)
 {
   if (comm->me == 0) {
-    utils::sfread(FLERR,&kappa,sizeof(double),1,fp,nullptr,error);
     utils::sfread(FLERR,&cut_global,sizeof(double),1,fp,nullptr,error);
     utils::sfread(FLERR,&offset_flag,sizeof(int),1,fp,nullptr,error);
     utils::sfread(FLERR,&mix_flag,sizeof(int),1,fp,nullptr,error);
   }
-  MPI_Bcast(&kappa,1,MPI_DOUBLE,0,world);
+  
   MPI_Bcast(&cut_global,1,MPI_DOUBLE,0,world);
   MPI_Bcast(&offset_flag,1,MPI_INT,0,world);
   MPI_Bcast(&mix_flag,1,MPI_INT,0,world);
@@ -345,21 +410,23 @@ void PairYukawa::read_restart_settings(FILE *fp)
    proc 0 writes to data file
 ------------------------------------------------------------------------- */
 
-void PairYukawa::write_data(FILE *fp)
+void PairInvPoly::write_data(FILE *fp)
 {
   for (int i = 1; i <= atom->ntypes; i++)
-    fprintf(fp,"%d %g\n",i,a[i][i]);
+    //only write same atom type interactions, no cutoff radius
+    fprintf(fp,"%d %g %g %g %g %g %g %g\n",i,sigma[i][i],a2[i][i],a4[i][i],a6[i][i],a8[i][i],a10[i][i],a12[i][i]);
 }
 
 /* ----------------------------------------------------------------------
    proc 0 writes all pairs to data file
 ------------------------------------------------------------------------- */
 
-void PairYukawa::write_data_all(FILE *fp)
+void PairInvPoly::write_data_all(FILE *fp)
 {
   for (int i = 1; i <= atom->ntypes; i++)
     for (int j = i; j <= atom->ntypes; j++)
-      fprintf(fp,"%d %d %g %g\n",i,j,a[i][j],cut[i][j]);
+      //write all interactions (including different atom types), all info
+      fprintf(fp,"%d %d %g %g %g %g %g %g %g %g\n",i,j,sigma[i][j],a2[i][j],a4[i][j],a6[i][j],a8[i][j],a10[i][j],a12[i][j],rcut[i][j]);
 }
 
 /* ---------------------------------------------------------------------- */
@@ -368,15 +435,21 @@ double PairYukawa::single(int /*i*/, int /*j*/, int itype, int jtype, double rsq
                           double /*factor_coul*/, double factor_lj,
                           double &fforce)
 {
-  double r2inv,r,rinv,screening,forceyukawa,phi;
+  double r2inv,r4inv,r6inv,r8inv,r10inv,r12inv,forceinvpoly,phi;
+
 
   r2inv = 1.0/rsq;
-  r = sqrt(rsq);
-  rinv = 1.0/r;
-  screening = exp(-kappa*r);
-  forceyukawa = a[itype][jtype] * screening * (kappa + rinv);
-  fforce = factor_lj*forceyukawa * r2inv;
+  r4inv = r2inv * r2inv;
+  r6inv= r4inv * r2inv;
+  r8inv= r6inv * r2inv;
+  r10inv= r8inv * r2inv;
+  r12inv= r10inv * r2inv;
 
-  phi = a[itype][jtype] * screening * rinv - offset[itype][jtype];
-  return factor_lj*phi;
+  //forces, these are nonobvious and not necessarily equal to the analtyical radial force, see compute() for full comments
+  forceinvpoly = dinv_poly2[itype][jtype]*r2inv + dinv_poly4[itype][jtype]*r4inv + dinv_poly6[itype][jtype]*r6inv + dinv_poly8[itype][jtype]*r8inv + dinv_poly10[itype][jtype]*r10inv + dinv_poly12[itype][jtype]*r12inv;
+  fforce = factor_lj * forceinvpoly * r2inv; 
+
+  //offset potential
+  phi = inv_poly2[itype][jtype]*r2inv + inv_poly4[itype][jtype]*r4inv + inv_poly6[itype][jtype]*r6inv + inv_poly8[itype][jtype]*r8inv + inv_poly10[itype][jtype]*r10inv + inv_poly12[itype][jtype]*r12inv - offset[itype][jtype];
+  return factor*phi;
 }
