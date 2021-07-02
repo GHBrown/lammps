@@ -192,9 +192,9 @@ void PairInvPoly::allocate()
 
 void PairInvPoly::settings(int narg, char **arg)
 {
-  if (narg != 2) error->all(FLERR,"Illegal pair_style command");
+  if (narg != 1) error->all(FLERR,"Illegal pair_style command");
 
-  cut_global = utils::numeric(FLERR,arg[1],false,lmp);
+  cut_global = utils::numeric(FLERR,arg[0],false,lmp);
 
   // reset cutoffs that have been explicitly set
 
